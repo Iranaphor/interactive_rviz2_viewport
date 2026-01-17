@@ -1,0 +1,13 @@
+---
+session: datasim
+init_cmd: |
+  #exec /bin/bash
+  cd @TMULE_CONFIG_DIR@ || true
+  set -o pipefail
+  clear -x
+
+windows:
+- name: visualisation
+  panes:
+  - sleep 5 ; rviz2 -d /home/ros/ros2_ws/src/rviz2_viewport_control/tmule/default.rviz
+  - ros2 run rviz2_viewport_control boxes.py

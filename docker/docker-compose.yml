@@ -1,0 +1,39 @@
+services:
+  ros2_interactive_rviz2_viewport:
+    # — Build the image that lives in .devcontainer/Dockerfile ————————
+    build:
+      context: ..                       # root of the repo
+      dockerfile: docker/Dockerfile
+    image: interactive_rviz2_viewport        # resulting image name
+
+    container_name: interactive_rviz2_viewport
+    network_mode: bridge
+    ipc: "host"
+    tty: true
+    stdin_open: true
+
+    # — Bind‑mount each git sub‑module into the workspace ————————————
+    volumes:
+
+      # Mount data and bash dirs
+      - ../bash_scripts/container:/home/ros/bash_scripts:rw
+
+      # Mount any repositories/submodules
+      - ../rviz2_viewport_control:/home/ros/ros2_ws/src/rviz2_viewport_control:rw
+
+      # (Optional) keep colcon’s build artefacts outside the container
+      # and enable mount for gui applications
+      - colcon_cache:/home/ros/.colcon
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+
+    environment:
+      - DISPLAY=:0
+      - QT_X11_NO_MITSHM=1
+      - ROS_DOMAIN_ID=163
+      - AUTO_LAUNCH_TMULE=true
+
+    command: ["bash", "-l", "-c", "/home/ros/bash_scripts/start.sh"]
+
+
+volumes:
+  colcon_cache:
