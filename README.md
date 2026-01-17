@@ -8,3 +8,6 @@ To run the system, be on ubuntu and open x-host for docker to use `xhost +local:
 
 Click on the interactive markers to move between them. Click on one a second time to rotate around.
 
+<p align="center">
+  <img src="./docs/boxes.gif" alt="Moving boxes demo">
+</p>

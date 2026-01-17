@@ -10,4 +10,4 @@ windows:
 - name: visualisation
   panes:
   - sleep 5 ; rviz2 -d /home/ros/ros2_ws/src/rviz2_viewport_control/tmule/default.rviz
-  - ros2 run rviz2_viewport_control boxes.py
+  - sleep 15 ; ros2 run rviz2_viewport_control boxes.py
