@@ -134,6 +134,7 @@ class InteractiveBoxes(Node):
         self.box_tf: Dict[str, str] = {}                  # marker_name -> tf frame
         self.box_pos: Dict[str, Tuple[float, float]] = {} # marker_name -> (x,y)
         self.box_paths: Dict[str, PathState] = {}         # marker_name -> path
+        self.box_yaw: Dict[str, float] = {}               # marker_name -> current orientation
 
         # Viewpoint state (relative to view_parent_frame)
         self.view_rel_pos = (0.0, 0.0, 0.0)
@@ -146,6 +147,7 @@ class InteractiveBoxes(Node):
         self.trans_start_time = 0.0
         self.trans_from_world = (0.0, 0.0, 0.0)
         self.trans_target_box: Optional[str] = None
+        self.trans_source_box: Optional[str] = None
         self.trans_from_yaw = 0.0
         self.trans_to_yaw = 0.0
 
@@ -159,6 +161,7 @@ class InteractiveBoxes(Node):
             self.box_tf[name] = f"{name}_tf"
             self.box_pos[name] = (x, y)
             self.box_paths[name] = self._new_path_from((x, y))
+            self.box_yaw[name] = 0.0
 
             im = self._make_box_interactive_marker(name=name, x=x, y=y, rgb=rgb)
             self.server.insert(im, feedback_callback=self._on_feedback)
@@ -243,15 +246,36 @@ class InteractiveBoxes(Node):
     def _step_motion(self):
         dt = self.sim_dt
         for name, path in list(self.box_paths.items()):
+            old_pos = self.box_pos[name]
             path.t += dt / max(path.duration_s, 1e-6)
 
             if path.t >= 1.0:
                 self.box_pos[name] = path.goal
-                self.box_paths[name] = self._new_path_from(self.box_pos[name])
-                continue
-
-            x, y = bezier_quad(path.start, path.ctrl, path.goal, path.t)
-            self.box_pos[name] = (x, y)
+                new_path = self._new_path_from(self.box_pos[name])
+                self.box_paths[name] = new_path
+                # Calculate direction of new path for smooth rotation
+                dx = new_path.goal[0] - new_path.start[0]
+                dy = new_path.goal[1] - new_path.start[1]
+            else:
+                x, y = bezier_quad(path.start, path.ctrl, path.goal, path.t)
+                self.box_pos[name] = (x, y)
+                # Compute target yaw from velocity direction
+                dx = x - old_pos[0]
+                dy = y - old_pos[1]
+            
+            # Update yaw smoothly for both cases
+            if abs(dx) > 1e-4 or abs(dy) > 1e-4:
+                target_yaw = math.atan2(dy, dx)
+                # Smoothly interpolate current yaw toward target
+                current_yaw = self.box_yaw[name]
+                # Handle angle wrapping
+                diff = target_yaw - current_yaw
+                while diff > math.pi:
+                    diff -= 2.0 * math.pi
+                while diff < -math.pi:
+                    diff += 2.0 * math.pi
+                # Interpolate with damping factor (adjust 3.0 for faster/slower rotation)
+                self.box_yaw[name] = current_yaw + diff * min(1.0, dt * 3.0)
 
     # ---------------------------
     # Interactive marker pose updates (throttled)
@@ -310,7 +334,18 @@ class InteractiveBoxes(Node):
         # Capture current world pose
         (pos_w, yaw_w) = self._current_viewpoint_world()
         self.trans_from_world = pos_w
-        self.trans_from_yaw = yaw_w
+        
+        # Compute actual world yaw accounting for box rotation
+        if self.view_parent_frame != self.fixed_frame:
+            # Find source box
+            for name, tf_name in self.box_tf.items():
+                if tf_name == self.view_parent_frame:
+                    self.trans_source_box = name
+                    self.trans_from_yaw = self.box_yaw[name] + self.view_yaw
+                    break
+        else:
+            self.trans_source_box = None
+            self.trans_from_yaw = self.view_yaw
 
         self.trans_target_box = marker_name
         self.trans_to_yaw = 0.0
@@ -412,9 +447,18 @@ class InteractiveBoxes(Node):
 
             x, y, z = bezier_cubic(p0, p1, p2, p3, t)
 
-            # Interpolate yaw back to 0 during transition
+            # Interpolate yaw to match target box's current orientation
+            target_world_yaw = self.box_yaw[self.trans_target_box]
+            # Handle angle wrapping for smooth interpolation
+            diff = target_world_yaw - self.trans_from_yaw
+            while diff > math.pi:
+                diff -= 2.0 * math.pi
+            while diff < -math.pi:
+                diff += 2.0 * math.pi
+            interpolated_yaw = self.trans_from_yaw + diff * t
+            
             self.view_rel_pos = (x, y, z)
-            self.view_yaw = (1.0 - t) * self.trans_from_yaw + t * self.trans_to_yaw
+            self.view_yaw = interpolated_yaw
 
             # End transition
             if t_raw >= 1.0:
@@ -431,7 +475,7 @@ class InteractiveBoxes(Node):
             t.transform.translation.x = float(x)
             t.transform.translation.y = float(y)
             t.transform.translation.z = float(self.box_z)
-            t.transform.rotation = quat_from_yaw(0.0)
+            t.transform.rotation = quat_from_yaw(self.box_yaw[name])
             self.tf_broadcaster.sendTransform(t)
 
         # TF: parent -> viewpoint
