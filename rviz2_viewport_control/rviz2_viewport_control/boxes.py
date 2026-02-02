@@ -104,8 +104,8 @@ class InteractiveBoxes(Node):
         self.server = InteractiveMarkerServer(self, "interactive_boxes")
 
         # --- Config ---
-        self.bounds_min = -5.0  # 10m square => [-5, +5]
-        self.bounds_max = 5.0
+        self.bounds_min = -12.0  # 24m square => [-12, +12]
+        self.bounds_max = 12.0
         self.box_z = 0.15
         self.cube_size = 0.3
 
@@ -123,11 +123,26 @@ class InteractiveBoxes(Node):
 
         # (internal_name, initial_x, initial_y, (r,g,b))
         self.box_defs = [
-            ("box_00",   0.0,  0.0, (1.0, 0.1, 0.1)),   # red
-            ("box_10",   1.0,  0.0, (0.1, 0.9, 0.1)),   # green
-            ("box_01",   0.0,  1.0, (0.2, 0.4, 1.0)),   # blue
-            ("box_m10", -1.0,  0.0, (1.0, 0.8, 0.1)),   # gold
-            ("box_m1m1",-1.0, -1.0, (1.0, 0.2, 1.0)),   # magenta
+            ("box_00",   0.0,  0.0, (1.0, 0.1, 0.1)),    # red
+            ("box_01",   2.0,  1.0, (0.1, 0.9, 0.1)),    # green
+            ("box_02",   0.0,  3.0, (0.2, 0.4, 1.0)),    # blue
+            ("box_03",  -2.0,  0.0, (1.0, 0.8, 0.1)),    # gold
+            ("box_04",  -1.0, -2.0, (1.0, 0.2, 1.0)),    # magenta
+            ("box_05",   3.0,  3.0, (0.0, 1.0, 1.0)),    # cyan
+            ("box_06",  -3.0,  3.0, (1.0, 0.5, 0.0)),    # orange
+            ("box_07",   4.0, -1.0, (0.5, 0.0, 1.0)),    # purple
+            ("box_08",  -4.0, -3.0, (1.0, 1.0, 0.0)),    # yellow
+            ("box_09",   1.0, -4.0, (0.0, 1.0, 0.5)),    # spring green
+            ("box_10",  -2.0,  4.0, (1.0, 0.0, 0.5)),    # hot pink
+            ("box_11",   5.0,  2.0, (0.3, 1.0, 0.3)),    # lime
+            ("box_12",  -5.0,  1.0, (0.0, 0.5, 1.0)),    # sky blue
+            ("box_13",   2.0, -5.0, (1.0, 0.3, 0.7)),    # pink
+            ("box_14",  -1.0,  5.0, (0.7, 0.3, 1.0)),    # lavender
+            ("box_15",   6.0, -2.0, (1.0, 0.6, 0.0)),    # amber
+            ("box_16",  -6.0, -1.0, (0.0, 0.8, 0.8)),    # teal
+            ("box_17",   3.0, -6.0, (1.0, 0.0, 0.8)),    # rose
+            ("box_18",  -3.0,  6.0, (0.5, 1.0, 0.0)),    # chartreuse
+            ("box_19",   7.0,  3.0, (0.0, 0.6, 1.0)),    # azure
         ]
 
         # State: box motion
@@ -172,6 +187,7 @@ class InteractiveBoxes(Node):
         self.sim_timer = self.create_timer(self.sim_dt, self._step_motion)
         self.im_timer = self.create_timer(self.im_update_period, self._update_interactive_marker_poses)
         self.tf_timer = self.create_timer(self.sim_dt, self._publish_tfs)
+        self.auto_click_timer = self.create_timer(30.0, self._auto_click_box)
 
         # Start viewpoint at origin
         self._reset_viewpoint_to_origin()
@@ -375,6 +391,24 @@ class InteractiveBoxes(Node):
         self.rotating = True
         self._last_rot_time = time.time()
         self.click_stage = 2
+
+    def _auto_click_box(self):
+        """Automatically click a random box every 30 seconds."""
+        # Pick a random box
+        box_names = list(self.box_tf.keys())
+        if not box_names:
+            return
+        
+        random_box = random.choice(box_names)
+        
+        # Create a fake feedback object
+        feedback = InteractiveMarkerFeedback()
+        feedback.marker_name = random_box
+        feedback.event_type = InteractiveMarkerFeedback.BUTTON_CLICK
+        
+        # Call the feedback handler
+        self._on_feedback(feedback)
+        self.get_logger().info(f"Auto-clicked: {random_box}")
 
     def _on_feedback(self, feedback: InteractiveMarkerFeedback):
         if feedback.event_type != InteractiveMarkerFeedback.BUTTON_CLICK:
