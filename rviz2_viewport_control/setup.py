@@ -22,6 +22,7 @@ setup(
     entry_points={
         'console_scripts': [
             f'boxes.py = {pkg}.boxes:main',
+            f'glow_sphere.py = {pkg}.glow_sphere:main',
 #            f'transition.py = {pkg}.transition:main',
         ],
     },

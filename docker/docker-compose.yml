@@ -29,7 +29,7 @@ services:
     environment:
       - DISPLAY=:0
       - QT_X11_NO_MITSHM=1
-      - ROS_DOMAIN_ID=163
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-163}
       - AUTO_LAUNCH_TMULE=true
 
     command: ["bash", "-l", "-c", "/home/ros/bash_scripts/start.sh"]
