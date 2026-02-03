@@ -55,7 +55,7 @@ class BouncingBalls(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
 
         # Publisher for non-interactive markers
-        self.marker_pub = self.create_publisher(MarkerArray, "marker_array", 10)
+        self.marker_pub = self.create_publisher(MarkerArray, "/vis_all/all", 10)
 
         # --- Config ---
         self.bounds_min = -12.0
@@ -120,7 +120,7 @@ class BouncingBalls(Node):
 
         self.get_logger().info(
             "BouncingBalls ready.\n"
-            "Publishing MarkerArray to: marker_array\n"
+            "Publishing MarkerArray to: /vis_all/all\n"
             "Publishing TFs: map -> <ball>_tf for each ball\n"
             "Fixed frame: map"
         )
@@ -160,7 +160,7 @@ class BouncingBalls(Node):
         self.marker_pub.publish(marker_array)
         
         if not self._markers_published_once:
-            self.get_logger().info(f"Published {len(marker_array.markers)} ball markers to marker_array topic")
+            self.get_logger().info(f"Published {len(marker_array.markers)} ball markers to /vis_all/all topic")
             self._markers_published_once = True
 
     # ---------------------------

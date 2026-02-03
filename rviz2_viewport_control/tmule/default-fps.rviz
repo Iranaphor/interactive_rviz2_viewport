@@ -48,7 +48,7 @@ Visualization Manager:
     - Class: rviz_default_plugins/InteractiveMarkers
       Enable Transparency: true
       Enabled: true
-      Interactive Markers Namespace: /interactive_boxes
+      Interactive Markers Namespace: /vis_all/interactive
       Name: InteractiveMarkers
       Show Axes: false
       Show Descriptions: false

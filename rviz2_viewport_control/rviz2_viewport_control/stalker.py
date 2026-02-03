@@ -79,12 +79,12 @@ class ViewpointStalker(Node):
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
         # Interactive marker server
-        self.server = InteractiveMarkerServer(self, "interactive_boxes")
+        self.server = InteractiveMarkerServer(self, "/vis_all/interactive")
 
         # Subscribe to non-interactive markers from boxes
         self.marker_sub = self.create_subscription(
             MarkerArray,
-            "marker_array",
+            "/vis_all/all",
             self._on_marker_array,
             10
         )
@@ -115,6 +115,7 @@ class ViewpointStalker(Node):
         self.trans_source_box: Optional[str] = None
         self.trans_from_yaw = 0.0
         self.trans_to_yaw = 0.0
+        self.pending_attach_to: Optional[str] = None  # Defer frame switch to next cycle
 
         # Click tracking
         self.previous_clicked: Optional[str] = None
@@ -132,8 +133,8 @@ class ViewpointStalker(Node):
 
         self.get_logger().info(
             "ViewpointStalker ready.\n"
-            "Subscribing to: marker_array\n"
-            "Publishing interactive markers on namespace: interactive_boxes\n"
+            "Subscribing to: /vis_all/all\n"
+            "Publishing interactive markers on namespace: /vis_all/interactive\n"
             "Publishing TF: <parent> -> viewpoint\n"
             f"Camera transition: {self.transition_duration_s:.2f}s spline"
         )
@@ -232,24 +233,49 @@ class ViewpointStalker(Node):
     # ---------------------------
     def _current_viewpoint_world(self) -> Tuple[Tuple[float, float, float], float]:
         """
-        Compute viewpoint's world position from current state.
+        Compute viewpoint's world position from current state using TF lookups for accuracy.
         """
         if self.view_parent_frame == self.fixed_frame:
             return (self.view_rel_pos, self.view_yaw)
 
-        # If attached to a box tf
-        attached_box = None
-        for name, tf_name in self.box_tf_frames.items():
-            if tf_name == self.view_parent_frame:
-                attached_box = name
-                break
-
-        if attached_box is None or attached_box not in self.box_positions:
-            # Fallback
+        # If attached to a non-map frame, use TF to get accurate world position
+        try:
+            # Look up the transform from map to the parent frame
+            trans = self.tf_buffer.lookup_transform(
+                self.fixed_frame,
+                self.view_parent_frame,
+                rclpy.time.Time(),
+                timeout=rclpy.duration.Duration(seconds=0.1)
+            )
+            
+            # Get parent frame position in world
+            parent_x = float(trans.transform.translation.x)
+            parent_y = float(trans.transform.translation.y)
+            parent_z = float(trans.transform.translation.z)
+            
+            # Get parent frame orientation
+            q = trans.transform.rotation
+            parent_yaw = math.atan2(
+                2.0 * (q.w * q.z + q.x * q.y),
+                1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+            )
+            
+            # Transform viewpoint relative position to world coordinates
+            # Apply rotation to relative position
+            cos_yaw = math.cos(parent_yaw)
+            sin_yaw = math.sin(parent_yaw)
+            world_x = parent_x + (self.view_rel_pos[0] * cos_yaw - self.view_rel_pos[1] * sin_yaw)
+            world_y = parent_y + (self.view_rel_pos[0] * sin_yaw + self.view_rel_pos[1] * cos_yaw)
+            world_z = parent_z + self.view_rel_pos[2]
+            
+            world_yaw = parent_yaw + self.view_yaw
+            
+            return ((world_x, world_y, world_z), world_yaw)
+            
+        except Exception as e:
+            self.get_logger().warn(f"Could not lookup TF for {self.view_parent_frame}: {e}")
+            # Fallback to stored position
             return (self.view_rel_pos, self.view_yaw)
-
-        bx, by = self.box_positions[attached_box]
-        return ((bx, by, self.box_z), self.view_yaw)
 
     # ---------------------------
     # Viewpoint click logic + transitions
@@ -265,30 +291,20 @@ class ViewpointStalker(Node):
         self.selected_marker = None
         self.trans_target_box = None
 
-    def _begin_transition_to_box(self, marker_name: str):
+    def _begin_transition_to_origin(self):
+        """Start a smooth transition back to world origin."""
         # Stop rotation during transition
         self.rotating = False
 
         # Capture current world pose
         (pos_w, yaw_w) = self._current_viewpoint_world()
         self.trans_from_world = pos_w
-        
-        # Compute actual world yaw accounting for box rotation
-        if self.view_parent_frame != self.fixed_frame:
-            # Find source box
-            for name, tf_name in self.box_tf_frames.items():
-                if tf_name == self.view_parent_frame:
-                    self.trans_source_box = name
-                    if name in self.box_yaws:
-                        self.trans_from_yaw = self.box_yaws[name] + self.view_yaw
-                    else:
-                        self.trans_from_yaw = self.view_yaw
-                    break
-        else:
-            self.trans_source_box = None
-            self.trans_from_yaw = self.view_yaw
+        self.trans_from_yaw = yaw_w
 
-        self.trans_target_box = marker_name
+        self.get_logger().info(f"[TRANSITION] Begin transition to ORIGIN from world_pos={pos_w}, yaw={yaw_w:.2f}")
+
+        # Target is world origin
+        self.trans_target_box = None  # Special case: None means origin
         self.trans_to_yaw = 0.0
 
         self.transitioning = True
@@ -297,19 +313,69 @@ class ViewpointStalker(Node):
         # During transition we publish viewpoint in map frame
         self.view_parent_frame = self.fixed_frame
 
+        # Reset click stage
+        self.click_stage = 0
+        self.selected_marker = None
+
+    def _begin_transition_to_box(self, marker_name: str):
+        # Stop rotation during transition
+        self.rotating = False
+
+        # Capture current world pose
+        (pos_w, yaw_w) = self._current_viewpoint_world()
+        self.trans_from_world = pos_w
+        self.trans_from_yaw = yaw_w
+        
+        self.get_logger().info(f"[TRANSITION] Begin transition to '{marker_name}' from world_pos={pos_w}, yaw={yaw_w:.2f}")
+        self.get_logger().info(f"[TRANSITION] Previous parent_frame='{self.view_parent_frame}', rel_pos={self.view_rel_pos}")
+        
+        self.trans_target_box = marker_name
+        self.trans_to_yaw = 0.0
+
+        self.transitioning = True
+        self.trans_start_time = time.time()
+
+        # During transition we publish viewpoint in map frame
+        # Set view_rel_pos to the world position we just captured
+        self.view_parent_frame = self.fixed_frame
+        self.view_rel_pos = pos_w
+        self.view_yaw = yaw_w
+        
+        self.get_logger().info(f"[TRANSITION] Switched to map frame, set rel_pos={pos_w}")
+
         # Click stage becomes "attached pending" (we'll attach at end)
         self.click_stage = 1
         self.selected_marker = marker_name
 
     def _finish_attach_to_box(self):
         if self.trans_target_box is None:
+            # Finishing transition to origin - just stop transitioning, stay at map
+            self.transitioning = False
+            self.selected_marker = None
+            self.click_stage = 0
+            self._last_rot_time = time.time()
+            self.pending_attach_to = None
+            self.get_logger().info(f"[TRANSITION] Transition to origin completed at rel_pos={self.view_rel_pos}")
             return
-        self.view_parent_frame = self.box_tf_frames[self.trans_target_box]
-        self.view_rel_pos = (0.0, 0.0, 0.0)
-        self.view_yaw = 0.0
+        
+        # Finishing transition to a marker - defer the frame switch!
+        target_marker = self.trans_target_box
+        if target_marker not in self.box_tf_frames:
+            self.get_logger().error(f"Cannot finish transition to {target_marker}: TF frame not found")
+            return
+        
+        self.get_logger().info(f"[TRANSITION] Finishing transition to '{target_marker}'")
+        self.get_logger().info(f"[TRANSITION] Current state: parent='{self.view_parent_frame}', rel_pos={self.view_rel_pos}, yaw={self.view_yaw:.2f}")
+        
+        self.trans_target_box = None  # Clear this FIRST to prevent re-entry
         self.transitioning = False
-        self.trans_target_box = None
+        self.selected_marker = target_marker
+        self.click_stage = 1
         self._last_rot_time = time.time()
+        
+        # Defer the parent frame switch to next cycle
+        self.pending_attach_to = target_marker
+        self.get_logger().info(f"[TRANSITION] Set pending_attach_to='{target_marker}', will attach on next TF cycle")
 
     def _start_rotation(self):
         # Only makes sense when attached (not transitioning)
@@ -320,6 +386,13 @@ class ViewpointStalker(Node):
     def _on_feedback(self, feedback: InteractiveMarkerFeedback):
         if feedback.event_type != InteractiveMarkerFeedback.BUTTON_CLICK:
             return
+        
+        # Handle empty feedback as "return to world origin"
+        if not feedback.marker_name or feedback.marker_name == "":
+            self.get_logger().info("Received return to world command")
+            # Start a transition to world origin instead of snapping
+            self._begin_transition_to_origin()
+            return
 
         current = feedback.marker_name
         prev = self.previous_clicked
@@ -327,8 +400,8 @@ class ViewpointStalker(Node):
 
         # If clicking a different marker: start spline transition
         if current != self.selected_marker:
+            self.get_logger().info(f"Starting transition: {self.selected_marker} -> {current}")
             self._begin_transition_to_box(current)
-            self.get_logger().info(f"Clicked: {current} | previous: {prev} (transition)")
             return
 
         # Same marker clicked again:
@@ -352,6 +425,88 @@ class ViewpointStalker(Node):
     # TF publishing (smooth viewpoint)
     # ---------------------------
     def _publish_viewpoint_tf(self):
+        # Handle pending attach - switch parent frame at the START of the cycle
+        if self.pending_attach_to:
+            target_marker = self.pending_attach_to
+            self.pending_attach_to = None
+            
+            self.get_logger().info(f"[ATTACH] Executing pending attach to '{target_marker}'")
+            
+            # Capture current world position BEFORE switching frames
+            current_world_pos = self.view_rel_pos  # Already in world coords since parent is map
+            current_world_yaw = self.view_yaw
+            
+            self.get_logger().info(f"[ATTACH] Before attach: parent='{self.view_parent_frame}', world_pos={current_world_pos}, world_yaw={current_world_yaw:.2f}")
+            
+            # Get target TF frame's world position via TF lookup
+            try:
+                target_tf = self.box_tf_frames[target_marker]
+                trans = self.tf_buffer.lookup_transform(
+                    self.fixed_frame,
+                    target_tf,
+                    rclpy.time.Time(),
+                    timeout=rclpy.duration.Duration(seconds=0.1)
+                )
+                
+                # Get TF frame position and orientation
+                tf_x = float(trans.transform.translation.x)
+                tf_y = float(trans.transform.translation.y)
+                tf_z = float(trans.transform.translation.z)
+                
+                q = trans.transform.rotation
+                tf_yaw = math.atan2(
+                    2.0 * (q.w * q.z + q.x * q.y),
+                    1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+                )
+                
+                self.get_logger().info(f"[ATTACH] Target TF '{target_tf}' at world_pos=({tf_x:.2f}, {tf_y:.2f}, {tf_z:.2f}), yaw={tf_yaw:.2f}")
+                
+                # Calculate inverse transform: what rel_pos gives us current world pos?
+                # world_pos = tf_pos + rotate(rel_pos, tf_yaw)
+                # So: rel_pos = rotate_inverse(world_pos - tf_pos, tf_yaw)
+                dx = current_world_pos[0] - tf_x
+                dy = current_world_pos[1] - tf_y
+                dz = current_world_pos[2] - tf_z
+                
+                self.get_logger().info(f"[ATTACH] Delta from TF: ({dx:.2f}, {dy:.2f}, {dz:.2f})")
+                
+                cos_yaw = math.cos(-tf_yaw)  # Inverse rotation
+                sin_yaw = math.sin(-tf_yaw)
+                
+                rel_x = dx * cos_yaw - dy * sin_yaw
+                rel_y = dx * sin_yaw + dy * cos_yaw
+                rel_z = dz
+                
+                self.view_rel_pos = (rel_x, rel_y, rel_z)
+                self.view_yaw = current_world_yaw - tf_yaw
+                
+                self.get_logger().info(f"[ATTACH] Calculated rel_pos=({rel_x:.2f}, {rel_y:.2f}, {rel_z:.2f}), rel_yaw={self.view_yaw:.2f}")
+                
+            except Exception as e:
+                self.get_logger().error(f"[ATTACH] Failed to lookup TF for attach: {e}")
+                self.get_logger().error(f"[ATTACH] WARNING: Falling back to marker pose - this will likely cause incorrect positioning!")
+                # Fallback to marker pose
+                if target_marker in self.latest_marker_poses:
+                    marker_pose = self.latest_marker_poses[target_marker]
+                    self.view_rel_pos = (
+                        float(marker_pose.position.x),
+                        float(marker_pose.position.y),
+                        float(marker_pose.position.z)
+                    )
+                    q = marker_pose.orientation
+                    marker_yaw = math.atan2(
+                        2.0 * (q.w * q.z + q.x * q.y),
+                        1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+                    )
+                    self.view_yaw = marker_yaw
+                else:
+                    self.view_rel_pos = (0.0, 0.0, 0.0)
+                    self.view_yaw = 0.0
+            
+            # NOW switch the parent frame
+            self.view_parent_frame = self.box_tf_frames[target_marker]
+            self.get_logger().info(f"[ATTACH] Frame switched: parent='{self.view_parent_frame}', rel_pos={self.view_rel_pos}, rel_yaw={self.view_yaw:.2f}")
+        
         # Update viewpoint yaw if rotating
         if self.rotating:
             now = time.time()
@@ -361,19 +516,80 @@ class ViewpointStalker(Node):
             self.view_yaw = (self.view_yaw + omega * dt) % (2.0 * math.pi)
 
         # Handle camera transition along spline (in map frame)
-        if self.transitioning and self.trans_target_box is not None:
-            if self.trans_target_box not in self.box_positions:
-                # Target box not tracked yet, wait
-                return
-                
+        if self.transitioning:
             now = time.time()
             t_raw = (now - self.trans_start_time) / max(self.transition_duration_s, 1e-6)
             t = smoothstep(t_raw)
+            
+            # Check if transitioning to origin or to a marker
+            if self.trans_target_box is None:
+                # Transitioning to world origin
+                target_x, target_y, target_z = 0.0, 0.0, 0.0
+                target_yaw = 0.0
+            else:
+                # Transitioning to a marker - get target position from TF for accuracy
+                try:
+                    target_tf = self.box_tf_frames.get(self.trans_target_box)
+                    if not target_tf:
+                        return
+                    
+                    trans = self.tf_buffer.lookup_transform(
+                        self.fixed_frame,
+                        target_tf,
+                        rclpy.time.Time(),
+                        timeout=rclpy.duration.Duration(seconds=0.1)
+                    )
+                    
+                    # Get target TF position in world coordinates
+                    tf_x = float(trans.transform.translation.x)
+                    tf_y = float(trans.transform.translation.y)
+                    tf_z = float(trans.transform.translation.z)
+                    
+                    # Get TF orientation
+                    q = trans.transform.rotation
+                    tf_yaw = math.atan2(
+                        2.0 * (q.w * q.z + q.x * q.y),
+                        1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+                    )
+                    
+                    # Add marker's pose offset relative to its TF frame
+                    if self.trans_target_box in self.latest_marker_poses:
+                        marker_pose = self.latest_marker_poses[self.trans_target_box]
+                        # Transform marker position by TF rotation
+                        cos_yaw = math.cos(tf_yaw)
+                        sin_yaw = math.sin(tf_yaw)
+                        marker_x = marker_pose.position.x
+                        marker_y = marker_pose.position.y
+                        marker_z = marker_pose.position.z
+                        
+                        target_x = tf_x + (marker_x * cos_yaw - marker_y * sin_yaw)
+                        target_y = tf_y + (marker_x * sin_yaw + marker_y * cos_yaw)
+                        target_z = tf_z + marker_z
+                        
+                        # Get marker orientation relative to TF
+                        q_marker = marker_pose.orientation
+                        marker_yaw = math.atan2(
+                            2.0 * (q_marker.w * q_marker.z + q_marker.x * q_marker.y),
+                            1.0 - 2.0 * (q_marker.y * q_marker.y + q_marker.z * q_marker.z)
+                        )
+                        target_yaw = tf_yaw + marker_yaw
+                    else:
+                        target_x = tf_x
+                        target_y = tf_y
+                        target_z = tf_z
+                        target_yaw = tf_yaw
+                    
+                except Exception as e:
+                    # Fallback to stored position if TF lookup fails
+                    if self.trans_target_box not in self.box_positions:
+                        return
+                    bx, by = self.box_positions[self.trans_target_box]
+                    target_x, target_y, target_z = bx, by, self.box_z
+                    target_yaw = self.box_yaws.get(self.trans_target_box, 0.0)
 
-            # Target is the CURRENT box position (so camera homes onto moving box)
-            bx, by = self.box_positions[self.trans_target_box]
+            # Transition to target position
             p0 = self.trans_from_world
-            p3 = (bx, by, self.box_z)
+            p3 = (target_x, target_y, target_z)
 
             # Build a nice curved Bezier using direction vector
             dx = p3[0] - p0[0]
@@ -392,25 +608,22 @@ class ViewpointStalker(Node):
 
             x, y, z = bezier_cubic(p0, p1, p2, p3, t)
 
-            # Interpolate yaw to match target box's current orientation
-            if self.trans_target_box in self.box_yaws:
-                target_world_yaw = self.box_yaws[self.trans_target_box]
-                # Handle angle wrapping for smooth interpolation
-                diff = target_world_yaw - self.trans_from_yaw
-                while diff > math.pi:
-                    diff -= 2.0 * math.pi
-                while diff < -math.pi:
-                    diff += 2.0 * math.pi
-                interpolated_yaw = self.trans_from_yaw + diff * t
-            else:
-                interpolated_yaw = self.trans_from_yaw
+            # Interpolate yaw to match target's current orientation
+            # Handle angle wrapping for smooth interpolation
+            diff = target_yaw - self.trans_from_yaw
+            while diff > math.pi:
+                diff -= 2.0 * math.pi
+            while diff < -math.pi:
+                diff += 2.0 * math.pi
+            interpolated_yaw = self.trans_from_yaw + diff * t
             
             self.view_rel_pos = (float(x), float(y), float(z))
             self.view_yaw = float(interpolated_yaw)
 
             # End transition
             if t_raw >= 1.0:
-                self._finish_attach_to_box()
+                if self.transitioning:  # Only finish if we're still transitioning
+                    self._finish_attach_to_box()
 
         # TF: parent -> viewpoint
         stamp = self.get_clock().now().to_msg()
