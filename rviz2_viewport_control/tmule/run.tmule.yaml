@@ -11,4 +11,10 @@ windows:
   panes:
   - rviz2 -d /home/ros/ros2_ws/src/rviz2_viewport_control/tmule/default-fps.rviz
   - rviz2 -d /home/ros/ros2_ws/src/rviz2_viewport_control/tmule/default-orbit.rviz
-  - ros2 run rviz2_viewport_control boxes.py
+
+- name: nodes
+  panes:
+  #- ros2 run rviz2_viewport_control boxes.py
+  - ros2 run rviz2_viewport_control bouncing_balls.py
+  - ros2 run rviz2_viewport_control stalker.py
+  - ros2 run rviz2_viewport_control auto_follower.py

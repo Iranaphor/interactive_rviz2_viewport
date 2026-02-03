@@ -22,6 +22,9 @@ setup(
     entry_points={
         'console_scripts': [
             f'boxes.py = {pkg}.boxes:main',
+            f'bouncing_balls.py = {pkg}.bouncing_balls:main',
+            f'stalker.py = {pkg}.stalker:main',
+            f'auto_follower.py = {pkg}.auto_follower:main',
             f'glow_sphere.py = {pkg}.glow_sphere:main',
 #            f'transition.py = {pkg}.transition:main',
         ],
